@@ -29,7 +29,7 @@ class PIDController:
         current_time = time.time()
         dt = current_time - self.last_time
         self.last_time = current_time
-        
+
         error = self.setpoint - measurement
         self.integral += error * dt
         derivative = (error - self.prev_error) / dt if dt > 0 else 0
@@ -51,7 +51,7 @@ def main():
         tello.connect()
         print(f"[STATUS] 连接成功! 电池电量: {tello.get_battery()}%")
         tello.TIME_BTW_RC_CONTROL_COMMANDS = 0.01
-        
+
         # 启动视频流
         print("[VIDEO] 启动视频流")
         tello.streamon()
@@ -76,7 +76,7 @@ def main():
         pid_yaw = PIDController(Kp=0.2, Ki=0.01, Kd=0.001, max_output=50, setpoint=320)  # 偏航控制
         pid_ud = PIDController(Kp=0.2, Ki=0.01, Kd=0.001, max_output=50, setpoint=240)   # 上下控制
         pid_fb = PIDController(Kp=0.002, Ki=0.0, Kd=0.0002, max_output=50, setpoint=50000)  # 前后控制
-        
+
         last_time = time.time()
         last_print_time = time.time()
         print("[STATUS] 开始人体检测循环 (按 'q' 键退出)")
@@ -91,6 +91,11 @@ def main():
         yaw_speed = 0  # 旋转速度
         ud_speed = 0   # 上下速度
         fb_speed = 0   # 前后速度
+        
+        # 跟踪变量
+        tracked_person = None
+        last_center = None
+        first_detection = True
 
         while True:
             current_time = time.time()
@@ -110,18 +115,45 @@ def main():
 
             # 检测目标
             results = detector.detect(frame)
-            selected_person = None
-            max_area = 0
-            person_count = 0
-
-            for res in results:
-                if res["label"] == "person":
-                    person_count += 1
-                    x1, y1, x2, y2 = res["box"]
+            persons = [res for res in results if res["label"] == "person"]
+            person_count = len(persons)
+            
+            # 跟踪逻辑
+            if first_detection and person_count > 0:
+                # 第一次检测，选择最大的框体
+                max_area = 0
+                selected_person = None
+                for person in persons:
+                    x1, y1, x2, y2 = person["box"]
                     area = (x2 - x1) * (y2 - y1)
                     if area > max_area:
                         max_area = area
-                        selected_person = res
+                        selected_person = person
+                tracked_person = selected_person
+                if tracked_person:
+                    x1, y1, x2, y2 = tracked_person["box"]
+                    last_center = ((x1 + x2) // 2, (y1 + y2) // 2)
+                    first_detection = False
+            elif not first_detection and person_count > 0:
+                # 后续检测，选择距离上次中心最近的人
+                min_distance = float('inf')
+                selected_person = None
+                for person in persons:
+                    x1, y1, x2, y2 = person["box"]
+                    current_center = ((x1 + x2) // 2, (y1 + y2) // 2)
+                    distance = np.sqrt((current_center[0] - last_center[0])**2 + 
+                                      (current_center[1] - last_center[1])**2)
+                    if distance < min_distance:
+                        min_distance = distance
+                        selected_person = person
+                tracked_person = selected_person
+                if tracked_person:
+                    x1, y1, x2, y2 = tracked_person["box"]
+                    last_center = ((x1 + x2) // 2, (y1 + y2) // 2)
+            elif person_count == 0:
+                # 没有检测到人，重置跟踪状态
+                tracked_person = None
+                first_detection = True
 
             # 每2秒打印一次状态
             if current_time - last_print_time > 2.0:
@@ -130,12 +162,13 @@ def main():
                 frame_count = 0
 
             # 控制逻辑
-            if selected_person:
-                x1, y1, x2, y2 = selected_person["box"]
+            if tracked_person:
+                x1, y1, x2, y2 = tracked_person["box"]
                 current_x = (x1 + x2) // 2
                 current_y = (y1 + y2) // 2
                 current_area = (x2 - x1) * (y2 - y1)
-                targety=y2 - (y2 - y1) * 0.575
+                targety = y2 - (y2 - y1) * 0.575
+                
                 # 计算控制量
                 yaw_speed = -int(pid_yaw.compute(current_x))  # 偏航控制
                 ud_speed = int(pid_ud.compute(targety))   # 上下控制（注意方向）
@@ -152,6 +185,8 @@ def main():
                 # 可视化
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.circle(frame, (current_x, current_y), 5, (0, 255, 0), -1)
+                cv2.putText(frame, f"Tracking ID: {id(tracked_person)}", (x1, y1-30), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
                 cv2.putText(frame, f"YAW: {yaw_speed} UD: {ud_speed} FB: {fb_speed}",
                            (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
             else:
@@ -217,5 +252,6 @@ def main():
 
         print("[STATUS] 程序安全退出")
         sys.exit(0)
+
 if __name__ == "__main__":
     main()
